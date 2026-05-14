@@ -3,6 +3,7 @@ __pycache__/
 
 Training_data/
 *.pt
+!best_model.pt
 *.h5
 *_dogcat.npy
 
