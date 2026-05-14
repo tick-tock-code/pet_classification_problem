@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+Training_data/
+*.pt
+*.h5
+*_dogcat.npy
+
+*.docx
