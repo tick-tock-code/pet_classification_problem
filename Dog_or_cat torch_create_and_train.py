@@ -18,6 +18,11 @@ import sys
 import signal
 
 
+random_seed = 42
+random.seed(random_seed)
+np.random.seed(random_seed)
+torch.manual_seed(random_seed)
+
 
 
 """ --- Defining functions ---"""
@@ -224,11 +229,18 @@ def load_image(image_path, label, transform):
 
 
 # --- Creating torch Dataset and DataLoader ---
-def create_dataset(image_paths, labels, img_height, img_width, batch_size):
+def create_dataset(image_paths, labels, img_height, img_width, batch_size, class_names=None):
     """Creates PyTorch DataLoaders from image paths and labels."""
 
 
-    unique_labels = np.array(list(dict.fromkeys(labels)))
+    if class_names is None:
+        unique_labels = np.array(sorted(dict.fromkeys(labels)))
+    else:
+        unique_labels = np.array(class_names)
+        missing_labels = sorted(set(labels) - set(unique_labels))
+        if missing_labels:
+            raise ValueError(f"Labels found in data but missing from checkpoint classes: {missing_labels}")
+
     num_classes = len(unique_labels)
 
     print("Unique labels:", unique_labels)
@@ -381,12 +393,60 @@ def save_checkpoint(epoch, checkpoint_path=None, best_val_loss=None):
   torch.save(checkpoint, checkpoint_path)
 
 
+def load_checkpoint_classes(checkpoint_path):
+  if not os.path.exists(checkpoint_path):
+      return None
+
+  try:
+      checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+  except TypeError:
+      checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+  return checkpoint.get("classes")
+
+
+def load_training_checkpoint(checkpoint_path, model, optimizer, scheduler, device, history, expected_classes=None):
+  if not os.path.exists(checkpoint_path):
+      print("No checkpoint found. Starting training from scratch.")
+      return history, 0, float("inf")
+
+  try:
+      checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+  except TypeError:
+      checkpoint = torch.load(checkpoint_path, map_location=device)
+
+  checkpoint_classes = checkpoint.get("classes")
+  if expected_classes is not None and checkpoint_classes != list(expected_classes):
+      raise ValueError("Checkpoint classes do not match dataset classes. Refusing to resume with mismatched label order.")
+
+  model.load_state_dict(checkpoint["model_state_dict"])
+  optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+  if scheduler is not None and "scheduler_state_dict" in checkpoint:
+      scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+  history = checkpoint.get("history", history)
+  start_epoch = checkpoint.get("epoch", 0)
+
+  if "best_val_loss" in checkpoint:
+      best_val_loss = checkpoint["best_val_loss"]
+  elif history.get("val_loss"):
+      best_val_loss = min(history["val_loss"])
+  else:
+      best_val_loss = float("inf")
+
+  print(f"Resumed training from epoch {start_epoch}.")
+  print(f"Best validation loss so far: {best_val_loss:.4f}")
+
+  return history, start_epoch, best_val_loss
+
+
 def signal_handler(sig, frame):
   print('You pressed Ctrl+C!')
   # Your code to be run on interrupt
   try:
       print("Training interrupted by user. Saving model...")
-      save_checkpoint(current_epoch)  # Save the model
+      save_checkpoint(current_epoch, best_val_loss=best_val_loss)  # Save the model
       print("Model saved.")
   except Exception as e: # added exception handling
       print(f"Error saving model: {e}")
@@ -417,6 +477,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 data_directory = os.path.join(current_dir, 'Training_data', 'images')  # Replace with the actual path
 model_path = os.path.join(current_dir, "autosave_model.pt")
 best_model_path = os.path.join(current_dir, "best_model.pt")
+resume_training = False
+resume_model_path = best_model_path
+resume_class_names = load_checkpoint_classes(resume_model_path) if resume_training else None
 
 # Defining device and checkpoint frequency
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -438,7 +501,7 @@ if image_paths: #check if any images were found
     img_height = 224
     img_width = 224
     batch_size = 32
-    train_loader, test_loader, unique_labels, num_classes = create_dataset(image_paths, labels, img_height, img_width, batch_size)
+    train_loader, test_loader, unique_labels, num_classes = create_dataset(image_paths, labels, img_height, img_width, batch_size, class_names=resume_class_names)
     print(unique_labels)
 
     # Print shapes of a single batch shape = (batch_size, rgb_depth, x, y)
@@ -496,15 +559,28 @@ history = {
     "val_recall": [],
 }
 current_epoch = 0
+start_epoch = 0
 best_val_loss = float("inf")
+
+if resume_training:
+    history, start_epoch, best_val_loss = load_training_checkpoint(
+        resume_model_path,
+        model,
+        optimizer,
+        scheduler,
+        device,
+        history,
+        expected_classes=unique_labels.tolist()
+    )
+
 signal.signal(signal.SIGINT, signal_handler)
 
 
 """ --- Training Model --- """
 # Train the model
-epochs = 30  # Number of training epochs
+epochs = 60  # Number of training epochs
 
-for epoch in range(epochs):
+for epoch in range(start_epoch, epochs):
     current_epoch = epoch + 1
 
     model.train()
@@ -532,7 +608,7 @@ for epoch in range(epochs):
         train_targets.append(labels.detach().cpu())
 
         if batch_index % checkpoint_save_freq == 0:
-            save_checkpoint(current_epoch)
+            save_checkpoint(current_epoch, best_val_loss=best_val_loss)
             print(f"Saved checkpoint to: {model_path}")
 
     train_loss = train_loss_total / train_count
@@ -586,7 +662,7 @@ for epoch in range(epochs):
 
 
 # Saving model if training successful
-save_checkpoint(current_epoch)
+save_checkpoint(current_epoch, best_val_loss=best_val_loss)
 print(f"Model saved to: {model_path}") #Print the full path
 
 
