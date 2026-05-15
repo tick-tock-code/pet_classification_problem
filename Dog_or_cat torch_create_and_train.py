@@ -4,6 +4,7 @@
 # PyTorch with CUDA support is recommended for GPU training on Windows
 
 import os
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -370,6 +371,15 @@ def calculate_metrics(predictions, targets, num_classes):
     return accuracy, macro_precision, macro_recall
 
 
+def get_history_index(history, index):
+    """Gets all metric values from a history dictionary at a given epoch index."""
+    return {
+        metric_name: float(metric_values[index])
+        for metric_name, metric_values in history.items()
+        if len(metric_values) > index
+    }
+
+
 def save_checkpoint(epoch, checkpoint_path=None, best_val_loss=None):
   if checkpoint_path is None:
       checkpoint_path = model_path
@@ -696,3 +706,58 @@ for metric_name in history:
     metric_values = np.array(history[metric_name])
     np.save(f"{metric_name}_dogcat.npy", metric_values)
     print(f"saved {metric_name}")
+
+
+""" --- Saving the best metric values --- """
+best_index = int(np.argmin(history["val_loss"]))
+best_metrics = get_history_index(history, best_index)
+best_metrics["best_epoch"] = best_index + 1
+
+best_metrics_path = os.path.join(current_dir, "best_metrics.json")
+with open(best_metrics_path, "w") as file:
+    json.dump(best_metrics, file, indent=2)
+
+print(f"Best metrics saved to: {best_metrics_path}")
+print(best_metrics)
+
+
+""" --- Creating confusion matrix from best model --- """
+try:
+    best_checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
+except TypeError:
+    best_checkpoint = torch.load(best_model_path, map_location=device)
+
+model.load_state_dict(best_checkpoint["model_state_dict"])
+model.eval()
+
+confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
+
+with torch.no_grad():
+    for images, labels in test_ds:
+        images = images.to(device)
+        labels = labels.to(device)
+
+        outputs = model(images)
+        predictions = torch.argmax(outputs, dim=1)
+
+        for true_label, predicted_label in zip(labels.cpu().numpy(), predictions.cpu().numpy()):
+            confusion[true_label, predicted_label] += 1
+
+confusion_matrix_path = os.path.join(current_dir, "confusion_matrix.npy")
+np.save(confusion_matrix_path, confusion)
+print(f"Confusion matrix saved to: {confusion_matrix_path}")
+
+plt.figure(figsize=(14, 14))
+plt.imshow(confusion, cmap="Blues")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted label")
+plt.ylabel("True label")
+plt.xticks(range(num_classes), unique_labels, rotation=90)
+plt.yticks(range(num_classes), unique_labels)
+plt.colorbar()
+plt.tight_layout()
+
+confusion_matrix_plot_path = os.path.join(current_dir, "confusion_matrix.png")
+plt.savefig(confusion_matrix_plot_path, dpi=200)
+print(f"Confusion matrix plot saved to: {confusion_matrix_plot_path}")
+plt.show()
